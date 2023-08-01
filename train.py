@@ -148,13 +148,13 @@ class TensorProductConvLayer(torch.nn.Module):
         self.sh_irreps = sh_irreps
         self.residual = residual
         self.dropout = torch.nn.Dropout(dropout)
-
+        self.doubleleakyrelu=DoubleleakyRelu.apply
         self.tp = tp = o3.FullyConnectedTensorProduct(in_irreps, sh_irreps, out_irreps, shared_weights=False)
 
         self.fc = nn.Sequential(
             nn.Linear(n_edge_features, n_edge_features),
             nn.ReLU(),
-            nn.Linear(n_edge_features, tp.weight_numel)
+            nn.Linear(n_edge_features, tp.weight_numel),
         )
         self.batch_norm = BatchNorm(out_irreps) if batch_norm else None
 
@@ -162,9 +162,9 @@ class TensorProductConvLayer(torch.nn.Module):
 
         edge_src, edge_dst = edge_index
         if type(node_attr) is tuple:
-            tp = self.tp(node_attr[0][edge_src], edge_sh, self.dropout(self.fc(edge_attr)))
+            tp = self.tp(node_attr[0][edge_src], edge_sh, self.dropout(self.doubleleakyrelu(self.fc(edge_attr))))
         else:
-            tp = self.tp(node_attr[edge_src], edge_sh, self.dropout(self.fc(edge_attr)))
+            tp = self.tp(node_attr[edge_src], edge_sh, self.dropout(self.doubleleakyrelu(self.fc(edge_attr))))
         if scatter_message:
             out = scatter(tp, edge_dst, dim=0, dim_size=out_nodes, reduce=reduce)
         else:
@@ -181,6 +181,18 @@ class TensorProductConvLayer(torch.nn.Module):
 
         return out
     
+class DoubleleakyRelu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        return torch.where(torch.abs(input)<=10.0,input,0.01*input)
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input[torch.abs(input) > 10.0] *= 0.01
+        return grad_input
+
 class Se3NN(torch.nn.Module):
     def __init__(self, num_node_features, ns=32,nv=8, n_layers=6,sh_lmax=2,dropout= 0,batch_norm=False,residual=True,n_times=1):
         super().__init__()
@@ -194,6 +206,7 @@ class Se3NN(torch.nn.Module):
         self.peembedding = torch.nn.Linear(10, ns)
         self.thresh=nn.Threshold(10,10)
         self.sh_irreps = o3.Irreps.spherical_harmonics(lmax=sh_lmax)
+        self.doubleleakyrelu=DoubleleakyRelu.apply
         self.dist_basis=[Normal(i,0.5) for i in range(10)]
         if sh_lmax==2:
              self.irrep_seq = [
@@ -263,6 +276,7 @@ class Se3NN(torch.nn.Module):
                 node_edge_features=torch.cat((node_features[src,:self.ns],node_features[dst,:self.ns],edge_features,reactant_edge_features,product_edge_features),dim=1)
                 coord_updates=coord_conv_layer(node_features,edge_index,node_edge_features,edge_sh,scatter_message=True)
                 #coord_updates=self.thresh(coord_updates)
+                coord_updates= self.doubleleakyrelu(coord_updates)
                 #coord_updates=-coord_updates
                 #coord_updates=self.thresh(coord_updates)
                 #coord_updates=-coord_updates
